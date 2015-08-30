@@ -7,7 +7,7 @@
 #
 # Input: ...
 #
-# Output: ...	
+# Output: ...	  
 #
 
 import subprocess
@@ -21,6 +21,7 @@ import csv
 import threading
 import logging
 
+# CONSTANTS
 VERBOSE_MODE =				True	# Verbose Mode: Currently only prints the commands to run
 TEST_MODE = 				False	# Must be True or False. If True, then just print out some test commands from a test file
 ASSETDB_QUERY_BRIEF = 		True	# If true, only query a specified sample size of switches found in the AssetDB
@@ -37,7 +38,7 @@ if (ASSETDB_QUERY_BRIEF == False):
 					"DNSname LIKE \'%.c3750.net.pitt.edu%\' OR DNSname LIKE \'%.c3850.net.pitt.edu%\'"  
 else:
 	# Query only a sample size of switches (for testing purposes)
-	SWITCH_NUM = "5" 
+	SWITCH_NUM = "3" 
 	ASSETDB_QUERY = "SELECT TOP " + SWITCH_NUM + " DNSname FROM Asset_Table WHERE Status LIKE \'Production\' AND " \
 					"DNSname LIKE \'%.c3750.net.pitt.edu%\' OR DNSname LIKE \'%.c3850.net.pitt.edu%\'"
 
@@ -60,6 +61,7 @@ class switchThread(object):
 	
 		self.lock = threading.Lock()
 		self.switchName = switchName
+		self.startTime = time.time();
 		
 		self.logger = logging.getLogger(switchName + "-Logger")
 		self.logger.setLevel(logging.DEBUG);
@@ -75,7 +77,9 @@ class switchThread(object):
 		
 		# override run method, start when switchThread starts 
 		threadResult = self.run();
-		self.logger.debug("Result: " + threadResult);
+		self.logger.debug("Thread Session Result: " + threadResult);
+		
+		self.threadRunTime = time.time() - self.startTime;
 		
 		# switchResultTable is passed to threads by reference, use it to update the main program about the success or 
 		# failure of the paramiko SSH session.  Surprisingly, it's fine to pass dictionaries by reference to threads, 
@@ -83,7 +87,7 @@ class switchThread(object):
 		# @bee14 I tested with and without this variable, doesn't seem to slow down long thread runtime
 		switchResultTable[switchName] = threadResult;  # result will be success or failure string, returned to main program
 		
-		self.logger.debug("Exiting thread now...")
+		self.logger.debug("Exiting thread now... Thread Run Time: %d" % self.threadRunTime)
 		return None
 		
 	def run(self):
@@ -129,21 +133,21 @@ class switchThread(object):
 		
 		if(TEST_MODE == False):
 			self.pstdin.write("configure terminal\n")   #enter configuration terminal
-			time.sleep(0.1)
+#			time.sleep(0.1)
 
 		for cmd in self.commandTable.keys():
 			self.pstdin.write("%s\n" % self.commandTable[cmd])
-			time.sleep(0.1);
+#			time.sleep(0.1);
 	
 		if(TEST_MODE == False):
 			self.pstdin.write("end\n")   #exit configuration terminal
-			time.sleep(0.1)
+#			time.sleep(0.1)
 			self.logger.debug("Writing to memory now, waiting 10 seconds for this to complete...")
 			self.pstdin.write("write mem\n")
-			# @bee14 Must time this if using paramiko, "write mem" must fully execute.
+			# Must time this if using paramiko, "write mem" must fully execute.
 			# I can't use pexpect (if using paramiko) to wait for prompt to come back, and the session closes if EOF is read early
 			# Since I cannot test "write mem" after running all this privilege commands myself, 10 seems like a safe waiting time
-			# I should honestly just use ssh subprocess and pexpect.  How does this look?
+			# I should probably just use ssh subprocess and pexpect.
 			time.sleep(10)  
 		
 		return "Commands have been run on the switch"
@@ -167,8 +171,9 @@ class switchThread(object):
 				terminalOutput = terminalOutput + lineStr
 			elif (lineStr != ''):
 				terminalOutput = terminalOutput + lineStr
-				
+		self.pstdin.write("exit\n")
 		return terminalOutput
+
 		
 
 # MAIN Function - Handles 5 Tasks 
@@ -186,6 +191,8 @@ def main():
 	except KeyboardInterrupt:
 		print("KeyboardInterrupt detected, terminating program")
 		sys.exit(-1)
+		
+	mainProgramTimeStart = time.time();
 	
 ##### (2) Retrieve commands
 	print ("\n\nRetrieving commands from configuration file...")
@@ -207,15 +214,15 @@ def main():
 	except IOError:
 		print("File Open Error, terminating program") 
 		sys.exit(-1)
-	print("\t%d commands to be run" % len(commandTable));
+	print("\tThere are %d commands to be run" % len(commandTable));
 	
-	logging.info("Output Commands to Run...")   #ccliff - forget double comments, add StreamHandler to logger in future
+	logging.info("\tCommands:")   #ccliff - forget double comments, add StreamHandler to logger in future
 	if (VERBOSE_MODE == True):
-		print("\n\nOutput Commands to Run...")
+		print("\tCommands:")
 	for cmd in commandTable.keys():
-		logging.info("\t%s" % commandTable[cmd])
+		logging.info("\t%s    " % commandTable[cmd])
 		if (VERBOSE_MODE == True):
-			print("\t%s" % commandTable[cmd])
+			print("\t    %s" % commandTable[cmd])
 	
 ##### (3) Query AssetDB for all Prod 3750/3850 DNS names 
 #####     Then, define a hash table, populate it with query result values
@@ -245,31 +252,26 @@ def main():
 		threadName = "Thread_" + switchName;
 		logFileName = "./switch output logs/" + switchName.rstrip(".net.pitt.edu") + "__Logging"
 		
-		# @tmp -> used for getting a sample time reading 
-		start = time.time();
-		
 		t = threading.Thread(name=threadName, target=switchThread, args=(switchName, logFileName, username, password, commandTable, switchResultTable));
 		#t = threading.Thread(name=threadName, target=switchThread, args=(switchName, logFileName, username, password, commandTable, 0)); 
 		t.start();
 		
-		# @tmp -> 3 lines below just used for getting a sample time reading, t.join() line will be taken out of course
-		t.join(); 
-		end = time.time() - start;  
-		print("\tTime taken: %d" % end);
-		
 		threadList.append(t)
-		
 		if(len(threadList) % 50 == 0):
 			print("\tCreated %d threads so far, %d threads to go.." % (len(threadList), (len(switchResultTable) - len(threadList))));
 		
-		time.sleep(0.5); # There are 707 switches, and they are all taking a long time to run.  This should probably wait much longer
+		time.sleep(1); # There are 707 Production 3750/3850 switches
 	
-	#@bee14 this is how I was ensuring all threads have completed, but I don't believe I need this if I just wait a long time ha
-	#print("\tAll threads have been started, waiting for threads to finish running...")
-	#for t in threadList:
-	#	t.join();
-	#time.sleep(20)
-	#print("\tAll threads have now completed\n")
+	
+	print("\tAll threads have been started, waiting for threads to finish running...")
+	
+	finishCount = 0;
+	for t in threadList:
+		t.join();
+		finishCount+=1;
+		if(finishCount % 25 == 0):
+			print("\t    %d threads have finished running, %d threads to go..." % (finishCount, len(threadList) - finishCount))
+	print("\tAll threads have now completed\n")
 	
 ##### (5) Output Results (put result status for each switch in a .csv file, user can check the logs for SSH sessions)
 	try:
@@ -284,7 +286,7 @@ def main():
 	failureCount = 0;
 	resultSampleOutputCount = 3; 
 	sampleOutputTable = "\t\tSwitch DNS Name,     \tProgram Result\n"
-	csvWriter.writerow(["Switch DNS Name", "Program Result"])
+	csvWriter.writerow(["Switch DNS Name", "Program Result", "Thread Run Time"])
 	for switch in switchResultTable.keys():
 		csvWriter.writerow([switch, switchResultTable[switch]])
 		if(switchResultTable[switch] != "LOGIN_SUCCESS_COMMANDS_RUN"):
@@ -304,7 +306,7 @@ def main():
 		print("\n\tNo SSH Login Failures were encountered.  See the individual switch logs if unsure \n" \
 		      "\tthat all commands were run successfully on a particular switch.")
 	
-	print ("\n\nProgram is Complete.")
+	print ("\n\nProgram is Complete.  Total run time: %d" % (time.time() - mainProgramTimeStart))
 	print ("    Check \"ssh_session_results.csv\" to verify each switch was connected to, \n" \
 		   "        and commands were at least run on the switch")
 	print ("    For more in-depth information, check the log files in the \"switch output logs\".\n" \
@@ -313,6 +315,9 @@ def main():
 		   "        any errors encountered while attempting to run the commands.")
 	print ("    The main program logs are in \"main_program.log\". This file contains all logging, \n" \
 		   "        from this program and every single switch thread.\n")
+	
+	
+	print ("\n\nProgram will complete after about 10-15 minutes, please wait til then");
 
 	# Close existing dynamic variables 
 	conn.close()
